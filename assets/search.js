@@ -22,19 +22,53 @@
     return q.toLowerCase().split(/\s+/).filter(Boolean);
   }
 
+  function haystack(item) {
+    return (
+      item.title + ' ' +
+      (item.ticker || '') + ' ' +
+      (item.name || '') + ' ' +
+      (item.headings || []).join(' ') + ' ' +
+      (item.snippet || '')
+    ).toLowerCase();
+  }
+
   function score(item, tokens) {
-    var hay = (item.title + ' ' + item.ticker + ' ' + (item.headings || []).join(' ') + ' ' + item.snippet).toLowerCase();
+    var hay = haystack(item);
     var s = 0;
     for (var i = 0; i < tokens.length; i++) {
       var t = tokens[i];
       if (!hay.includes(t)) return 0;
       if (item.ticker && item.ticker.toLowerCase() === t) s += 50;
+      if (item.name && item.name.toLowerCase().includes(t)) s += 20;
       if (item.title.toLowerCase().includes(t)) s += 10;
       var headJoined = (item.headings || []).join(' ').toLowerCase();
       if (headJoined.includes(t)) s += 5;
       s += 1;
     }
     return s;
+  }
+
+  // True when the query is naming this company (ticker or official name),
+  // not merely mentioning it in a research note or another firm's blurb.
+  var NAME_STOP = { inc:1, corp:1, ltd:1, llc:1, plc:1, the:1, and:1, group:1,
+                    holdings:1, nv:1, sa:1, se:1, company:1, co:1, ag:1 };
+  function isCompanyQueryFor(item, tokens) {
+    if (!item.is_landing) return false;
+    var ticker = (item.ticker || '').toLowerCase();
+    var name = (item.name || '').toLowerCase();
+    if (tokens.length === 1 && ticker && ticker === tokens[0]) return true;
+    if (!name) return false;
+    var meaningful = [];
+    for (var i = 0; i < tokens.length; i++) {
+      var t = tokens[i];
+      if (t.length >= 3 && !NAME_STOP[t]) meaningful.push(t);
+    }
+    if (!meaningful.length) return false;
+    for (var j = 0; j < meaningful.length; j++) {
+      if (name.indexOf(meaningful[j]) === -1) return false;
+    }
+    if (meaningful.length === 1 && meaningful[0].length < 4) return false;
+    return true;
   }
 
   function escapeHtml(s) {
@@ -69,34 +103,22 @@
     if (!q.trim()) { results.classList.remove('open'); results.innerHTML = ''; return; }
     ensureLoaded().then(function (items) {
       var tokens = tokenize(q);
-
-      // Ticker-symbol query → collapse to just that ticker's landing page.
-      // When the query is a single token that exactly matches a ticker symbol
-      // (case-insensitive), the user wants the company, not a separate hit for
-      // every subpage (overview / management / agenda / …). Return only the
-      // landing page, which links onward to all subpages. Free-text queries
-      // (multi-word, or not an exact symbol) fall through to full-text search.
-      if (tokens.length === 1) {
-        var sym = tokens[0];
-        var landing = null;
-        for (var k = 0; k < items.length; k++) {
-          var it = items[k];
-          if (it.is_landing && it.ticker && it.ticker.toLowerCase() === sym) {
-            landing = it;
-            break;
-          }
-        }
-        if (landing) { render([landing], q); return; }
+      var namedCompany = false;
+      for (var n = 0; n < items.length; n++) {
+        if (isCompanyQueryFor(items[n], tokens)) { namedCompany = true; break; }
       }
-
       var scored = [];
       for (var i = 0; i < items.length; i++) {
-        // Landing-page entries are only surfaced via the exact-symbol shortcut
-        // above; keep them out of the general full-text results so they don't
-        // duplicate the real pages.
-        if (items[i].is_landing) continue;
-        var s = score(items[i], tokens);
-        if (s > 0) scored.push({ s: s, item: items[i] });
+        var it = items[i];
+        // Never list per-ticker wiki pages (overview / thesis / transcripts / …).
+        // The company hit is always the landing page; buckets, research, sectors
+        // and other non-ticker pages still participate in full-text search.
+        if (it.ticker && !it.is_landing) continue;
+        if (namedCompany && it.is_landing && !isCompanyQueryFor(it, tokens)) continue;
+        var s = score(it, tokens);
+        if (s <= 0) continue;
+        if (it.is_landing && isCompanyQueryFor(it, tokens)) s += 80;
+        scored.push({ s: s, item: it });
       }
       scored.sort(function (a, b) { return b.s - a.s; });
       render(scored.map(function (x) { return x.item; }), q);
